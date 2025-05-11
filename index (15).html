@@ -1,0 +1,409 @@
+<script type="text/javascript">
+        var gk_isXlsx = false;
+        var gk_xlsxFileLookup = {};
+        var gk_fileData = {};
+        function filledCell(cell) {
+          return cell !== '' && cell != null;
+        }
+        function loadFileData(filename) {
+        if (gk_isXlsx && gk_xlsxFileLookup[filename]) {
+            try {
+                var workbook = XLSX.read(gk_fileData[filename], { type: 'base64' });
+                var firstSheetName = workbook.SheetNames[0];
+                var worksheet = workbook.Sheets[firstSheetName];
+
+                // Convert sheet to JSON to filter blank rows
+                var jsonData = XLSX.utils.sheet_to_json(worksheet, { header: 1, blankrows: false, defval: '' });
+                // Filter out blank rows (rows where all cells are empty, null, or undefined)
+                var filteredData = jsonData.filter(row => row.some(filledCell));
+
+                // Heuristic to find the header row by ignoring rows with fewer filled cells than the next row
+                var headerRowIndex = filteredData.findIndex((row, index) =>
+                  row.filter(filledCell).length >= filteredData[index + 1]?.filter(filledCell).length
+                );
+                // Fallback
+                if (headerRowIndex === -1 || headerRowIndex > 25) {
+                  headerRowIndex = 0;
+                }
+
+                // Convert filtered JSON back to CSV
+                var csv = XLSX.utils.aoa_to_sheet(filteredData.slice(headerRowIndex)); // Create a new sheet from filtered array of arrays
+                csv = XLSX.utils.sheet_to_csv(csv, { header: 1 });
+                return csv;
+            } catch (e) {
+                console.error(e);
+                return "";
+            }
+        }
+        return gk_fileData[filename] || "";
+        }
+        </script><!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Simple FPS Game with Laser Gun, Aiming, and Fixed Sky/Grass</title>
+    <style>
+        body { margin: 0; overflow: hidden; }
+        canvas { display: block; }
+        #crosshair { 
+            position: absolute; 
+            top: 50%; 
+            left: 50%; 
+            width: 20px; 
+            height: 20px; 
+            transform: translate(-50%, -50%); 
+            pointer-events: none; 
+        }
+        #score { 
+            position: absolute; 
+            top: 10px; 
+            left: 10px; 
+            color: white; 
+            font-family: Arial, sans-serif; 
+            font-size: 20px; 
+        }
+        #instructions {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            color: white;
+            font-family: Arial, sans-serif;
+            font-size: 24px;
+            text-align: center;
+            display: none;
+        }
+    </style>
+</head>
+<body>
+    <div id="crosshair">+</div>
+    <div id="score">Score: 0</div>
+    <div id="instructions">Click to lock mouse and start game</div>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r134/three.min.js"></script>
+    <script>
+        // Scene setup
+        const scene = new THREE.Scene();
+        const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+        const renderer = new THREE.WebGLRenderer();
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        document.body.appendChild(renderer.domElement);
+
+        // Player setup
+        camera.position.y = 1.6; // Eye height
+        let moveForward = false, moveBackward = false, moveLeft = false, moveRight = false;
+        const velocity = new THREE.Vector3();
+        const direction = new THREE.Vector3();
+        const baseSpeed = 0.1;
+        let speed = baseSpeed;
+
+        // Mouse look
+        let yaw = 0, pitch = 0;
+        const sensitivity = 0.002;
+        let isLocked = false;
+        document.body.addEventListener('mousemove', (event) => {
+            if (isLocked) {
+                yaw -= event.movementX * sensitivity;
+                pitch -= event.movementY * sensitivity;
+                pitch = Math.max(-Math.PI / 2, Math.min(Math.PI / 2, pitch));
+                camera.rotation.order = 'YXZ';
+                camera.rotation.set(pitch, yaw, 0);
+            }
+        });
+
+        // Pointer lock
+        const instructions = document.getElementById('instructions');
+        document.addEventListener('click', () => {
+            if (!isLocked) {
+                document.body.requestPointerLock().then(() => {
+                    isLocked = true;
+                    instructions.style.display = 'none';
+                }).catch((error) => {
+                    console.error('Pointer lock failed:', error);
+                    instructions.textContent = 'Pointer lock not supported. Please ensure the page allows pointer lock.';
+                    instructions.style.display = 'block';
+                });
+            }
+        });
+
+        document.addEventListener('pointerlockchange', () => {
+            isLocked = document.pointerLockElement === document.body;
+            instructions.style.display = isLocked ? 'none' : 'block';
+        });
+
+        // Keyboard controls
+        document.addEventListener('keydown', (event) => {
+            switch (event.code) {
+                case 'KeyW': moveForward = true; break;
+                case 'KeyS': moveBackward = true; break;
+                case 'KeyA': moveLeft = true; break;
+                case 'KeyD': moveRight = true; break;
+            }
+        });
+        document.addEventListener('keyup', (event) => {
+            switch (event.code) {
+                case 'KeyW': moveForward = false; break;
+                case 'KeyS': moveBackward = false; break;
+                case 'KeyA': moveLeft = false; break;
+                case 'KeyD': moveRight = false; break;
+            }
+        });
+
+        // Skybox (blue sky with clouds)
+        const textureLoader = new THREE.TextureLoader();
+        const skyboxGeometry = new THREE.BoxGeometry(1000, 1000, 1000);
+        let skyMaterial;
+        try {
+            const skyTexture = textureLoader.load(
+                'sky.jpg', // Local texture file (place in same directory)
+                () => console.log('Sky texture loaded successfully'),
+                undefined,
+                (err) => {
+                    console.error('Failed to load sky texture:', err);
+                    skyMaterial = new THREE.MeshBasicMaterial({ 
+                        color: 0x87ceeb, // Light blue fallback
+                        side: THREE.BackSide 
+                    });
+                }
+            );
+            skyMaterial = new THREE.MeshBasicMaterial({ 
+                map: skyTexture, 
+                side: THREE.BackSide 
+            });
+        } catch (e) {
+            console.error('Sky texture setup failed:', e);
+            skyMaterial = new THREE.MeshBasicMaterial({ 
+                color: 0x87ceeb, // Light blue fallback
+                side: THREE.BackSide 
+            });
+        }
+        const skybox = new THREE.Mesh(skyboxGeometry, skyMaterial);
+        scene.add(skybox);
+        console.log('Skybox added to scene');
+
+        // Ground (textured grass)
+        const groundGeometry = new THREE.PlaneGeometry(100, 100);
+        const grassTexture = textureLoader.load(
+            'https://threejs.org/examples/textures/terrain/grasslight-big.jpg', // Placeholder grass texture
+            () => console.log('Grass texture loaded'),
+            undefined,
+            (err) => {
+                console.error('Failed to load grass texture:', err);
+                ground.material.color.set(0x00ff00); // Green fallback
+            }
+        );
+        grassTexture.wrapS = grassTexture.wrapT = THREE.RepeatWrapping;
+        grassTexture.repeat.set(10, 10); // Tile the texture
+        const groundMaterial = new THREE.MeshBasicMaterial({ map: grassTexture });
+        const ground = new THREE.Mesh(groundGeometry, groundMaterial);
+        ground.rotation.x = -Math.PI / 2;
+        scene.add(ground);
+
+        // Enemies
+        const enemies = [];
+        const enemyGeometry = new THREE.BoxGeometry(1, 1, 1);
+        const enemyMaterial = new THREE.MeshBasicMaterial({ color: 0xff0000 });
+        function spawnEnemy() {
+            const enemy = new THREE.Mesh(enemyGeometry, enemyMaterial);
+            enemy.position.set(
+                (Math.random() - 0.5) * 50,
+                0.5,
+                (Math.random() - 0.5) * 50
+            );
+            scene.add(enemy);
+            enemies.push(enemy);
+        }
+
+        // Spawn enemies periodically
+        setInterval(spawnEnemy, 2000);
+
+        // Laser gun setup
+        const gunGroup = new THREE.Group();
+        // Gun body (box)
+        const gunBodyGeometry = new THREE.BoxGeometry(0.2, 0.1, 0.4);
+        const gunMaterial = new THREE.MeshBasicMaterial({ color: 0xaaaaaa }); // Silver
+        const gunBody = new THREE.Mesh(gunBodyGeometry, gunMaterial);
+        gunBody.position.set(0.2, -0.3, -0.5); // Right, down, forward
+        gunGroup.add(gunBody);
+        // Gun barrel (cylinder)
+        const gunBarrelGeometry = new THREE.CylinderGeometry(0.02, 0.02, 0.2, 8);
+        const gunBarrel = new THREE.Mesh(gunBarrelGeometry, gunMaterial);
+        gunBarrel.position.set(0.2, -0.3, -0.7); // Further forward
+        gunBarrel.rotation.x = Math.PI / 2; // Align along Z-axis
+        gunGroup.add(gunBarrel);
+        // Attach gun to camera
+        camera.add(gunGroup);
+        scene.add(camera);
+
+        // Laser setup
+        let score = 0;
+        const raycaster = new THREE.Raycaster();
+        const laserMaterial = new THREE.MeshBasicMaterial({ 
+            color: 0x00ff00, 
+            transparent: true, 
+            opacity: 1.0 
+        }); // Green laser with transparency
+        const laserMaxDistance = 100;
+        let isFiring = false;
+        let laser = null;
+        let lastHitTime = 0;
+        const hitCooldown = 100; // 100ms cooldown between hits
+
+        // Aiming setup
+        let isAiming = false;
+        const defaultFOV = 75;
+        const aimFOV = 50;
+        let currentFOV = defaultFOV;
+        const aimSpeed = 0.1; // Lerp speed for smooth FOV transition
+
+        document.addEventListener('mousedown', (event) => {
+            if (isLocked) {
+                if (event.button === 0 && !isFiring) { // Left click
+                    isFiring = true;
+                    createLaser();
+                } else if (event.button === 2) { // Right click
+                    isAiming = true;
+                    speed = baseSpeed * 0.5; // Reduce movement speed while aiming
+                }
+            }
+        });
+
+        document.addEventListener('mouseup', (event) => {
+            if (event.button === 0 && isFiring) { // Left click
+                isFiring = false;
+                removeLaser();
+            } else if (event.button === 2) { // Right click
+                isAiming = false;
+                speed = baseSpeed; // Restore movement speed
+            }
+        });
+
+        // Prevent context menu on right-click
+        document.addEventListener('contextmenu', (event) => {
+            event.preventDefault();
+        });
+
+        function createLaser() {
+            const laserGeometry = new THREE.CylinderGeometry(0.05, 0.05, 1, 8); // Initial length 1
+            laser = new THREE.Mesh(laserGeometry, laserMaterial);
+            scene.add(laser);
+            console.log('Laser created');
+        }
+
+        function removeLaser() {
+            if (laser) {
+                scene.remove(laser);
+                laser.geometry.dispose();
+                laser = null;
+                console.log('Laser removed');
+            }
+        }
+
+        function updateLaser() {
+            if (!laser || !isFiring) return;
+
+            // Animation parameters
+            const time = performance.now() * 0.005; // Slow animation speed
+            const pulse = Math.sin(time) * 0.5 + 0.5; // 0 to 1
+            const opacity = 0.7 + pulse * 0.3; // 0.7 to 1.0
+            const radius = 0.05 + pulse * 0.02; // 0.05 to 0.07
+            laserMaterial.opacity = opacity;
+
+            // Color variation
+            const baseColor = new THREE.Color(0x00ff00);
+            const intensity = 0.8 + pulse * 0.2; // 0.8 to 1.0
+            laserMaterial.color.setRGB(
+                baseColor.r * intensity,
+                baseColor.g * intensity,
+                baseColor.b * intensity
+            );
+
+            // Raycast to detect hit
+            raycaster.setFromCamera({ x: 0, y: 0 }, camera);
+            const intersects = raycaster.intersectObjects(enemies);
+            let hitDistance = laserMaxDistance;
+            let hitEnemy = null;
+
+            if (intersects.length > 0) {
+                hitEnemy = intersects[0].object;
+                hitDistance = intersects[0].distance;
+                const currentTime = performance.now();
+                if (currentTime - lastHitTime >= hitCooldown) {
+                    scene.remove(hitEnemy);
+                    enemies.splice(enemies.indexOf(hitEnemy), 1);
+                    score += 10;
+                    document.getElementById('score').textContent = `Score: ${score}`;
+                    lastHitTime = currentTime;
+                }
+            }
+
+            // Calculate laser start (from barrel tip) and end
+            const laserDirection = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion);
+            const laserEnd = camera.position.clone().add(laserDirection.multiplyScalar(hitDistance));
+
+            // Laser starts at barrel tip
+            const barrelTipLocal = new THREE.Vector3(0.2, -0.3, -0.8); // Slightly beyond barrel
+            const laserStart = camera.localToWorld(barrelTipLocal.clone());
+
+            // Update laser geometry (length and radius)
+            const distance = laserStart.distanceTo(laserEnd);
+            laser.geometry.dispose(); // Dispose old geometry
+            laser.geometry = new THREE.CylinderGeometry(radius, radius, distance, 8);
+
+            // Set laser position to midpoint between start and end
+            const midPoint = laserStart.clone().lerp(laserEnd, 0.5);
+            laser.position.copy(midPoint);
+
+            // Orient laser to point from start to end
+            laser.lookAt(laserEnd);
+            laser.rotateX(Math.PI / 2); // Adjust for cylinder's default orientation
+        }
+
+        // Game loop
+        function animate() {
+            requestAnimationFrame(animate);
+
+            // Update FOV for aiming
+            const targetFOV = isAiming ? aimFOV : defaultFOV;
+            currentFOV += (targetFOV - currentFOV) * aimSpeed;
+            camera.fov = currentFOV;
+            camera.updateProjectionMatrix();
+
+            // Movement
+            if (isLocked) {
+                velocity.x = 0;
+                velocity.z = 0;
+                direction.z = Number(moveForward) - Number(moveBackward);
+                direction.x = Number(moveRight) - Number(moveLeft);
+                direction.normalize();
+
+                if (moveForward || moveBackward || moveLeft || moveRight) {
+                    const forward = new THREE.Vector3(0, 0, -1);
+                    forward.applyQuaternion(new THREE.Quaternion().setFromEuler(new THREE.Euler(0, yaw, 0, 'YXZ')));
+                    const right = new THREE.Vector3().crossVectors(forward, new THREE.Vector3(0, 1, 0));
+
+                    velocity.add(forward.multiplyScalar(direction.z * speed));
+                    velocity.add(right.multiplyScalar(direction.x * speed));
+
+                    camera.position.add(velocity);
+                }
+            }
+
+            // Update laser if firing
+            if (isFiring) {
+                updateLaser();
+            }
+
+            renderer.render(scene, camera);
+        }
+        animate();
+
+        // Handle window resize
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        });
+    </script>
+</body>
+</html>
